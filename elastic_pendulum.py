@@ -20,24 +20,25 @@ def energy(Y, n_ic, g, k, m, L0, epsilon):
 def elastic_pendulum_jacobian(t, Y, g, k, m, L0, epsilon):
     """
     given state variable Y
-    returns jacobian matrix where each element is a numpy row vector 
+    returns jacobian matrix where each element is a numpy row vector; ie a (4 x 4 x n_ic) matrix
     """
-    #convert state variable into a 4 x n_ic matrix; each row is associated with one basis vector and the ith element is the value of that basis at the current step
+    #convert state variable into a 4 x n_ic matrix; each row is associated with one basis vector and the ith element is the value of that basis for the ith IC
     r, theta, dr, dtheta = Y.reshape(4, -1)
     
     ddr_dr = np.array(dtheta**2 - k/m - 2*epsilon/(r**3))
     ddr_dtheta = np.array(-g*np.sin(theta))
-    ddr_drdot = 0
+    ddr_drdot = np.zeros_like(r)
     ddrd_thetadot = np.array(2*r*theta)
     
     zero = np.zeros_like(r)
+    one = np.ones_like(r)
 
     ddtheta_dr = np.array(2*dr*dtheta / r**2)
     ddtheta_dtheta = np.array(-g/r*np.cos(theta))
     ddtheta_drdot = np.array(-2*dtheta/r) 
     ddtheta_dthetadot = np.array(-2*dr/r)
 
-    DfY = np.array([[zero, zero, zero + 1, zero], [zero, zero, zero, zero + 1], [ddr_dr, ddr_dtheta, ddr_drdot, ddrd_thetadot], [ddtheta_dr, ddtheta_dtheta, ddtheta_drdot, ddtheta_dthetadot]])
+    DfY = np.array([[zero, zero, one, zero], [zero, zero, zero, one], [ddr_dr, ddr_dtheta, ddr_drdot, ddrd_thetadot], [ddtheta_dr, ddtheta_dtheta, ddtheta_drdot, ddtheta_dthetadot]])
     return DfY
 
 def variational_IVP(t, Y, g, k, m, L0, epsilon):
@@ -52,18 +53,26 @@ def variational_IVP(t, Y, g, k, m, L0, epsilon):
     #print("Shape of dy:", dy.shape)
 
     Y = Y.reshape(8, -1)
+    n_ic = Y.shape[1]
     y = Y[:4]
     dy = Y[4:]
 
-    print(y.shape)
+    #print(y.shape)
     y_dot = elastic_pendulum(t, y, g, k, m, L0, epsilon)
     J = elastic_pendulum_jacobian(t, y, g, k, m, L0, epsilon)  # (4, 4, n_ic)
 
-    # Compute dy_dot as J @ dy for each initial condition
-    #dy_dot = np.einsum("ijk,jlk->ilk", J, dy)  # Einstein sum for batched matmul
-    dy_dot = np.dot(J,dy)
+    #reshape dy to match J
+    dy = dy.reshape(4,1,n_ic)
+    dy_dot = np.zeros_like(dy)
+    #print("J shape:", J.shape)
+    #print("dy shape:", dy.shape)
+    for i in range(dy.shape[2]):  # Loop over the third dimension or each condition
+        dy_dot[:, :, i] = np.dot(J[:, :, i], dy[:, :, i])  # Matrix-vector multiplication at each step
+    #print(dy_dot.shape)
+    #collapse into 2d matrix
+    dy_dot = dy_dot.reshape(4,n_ic)
 
-    return np.vstack([y_dot, dy_dot])  # Flatten perturbation
+    return np.vstack([y_dot, dy_dot]) 
 
 def compute_lyapunov_exponent(initial_conditions, perturbations, params, t_max=100, dt=0.1):
     """
@@ -85,57 +94,81 @@ def compute_lyapunov_exponent(initial_conditions, perturbations, params, t_max=1
     Returns:
     float
     Estimated largest Lyapunov exponent.
-    
-    # TODO: Implement numerical integration and track divergence of nearby trajectories.
-    n_eval = t_max / dt
-    t_span, t_eval = (0, tmax), np.linspace(0, tmax, n_eval)
-    sol = solve_ivp(variational_IVP,
-                t_span,
-                initial_conditions.flatten(),
-                args=params,
-                t_eval=t_eval,
-                method='RK45',
-                atol=1e-12,
-                rtol=1e-12,
-                vectorized=True)
     """
+    # TODO: Implement numerical integration and track divergence of nearby trajectories.
+            
     g, k, m, L0, epsilon = params
     n_ic = initial_conditions.shape[1]  # Number of initial conditions
     n_eval = int(t_max / dt)
     t_span = (0, t_max)
     t_eval = np.linspace(0, t_max, n_eval)
 
-    print("Perturbations shape before reshaping:", perturbations.shape)
+    #print("Perturbations shape before reshaping:", perturbations.shape)
 
     Y0 = np.vstack([initial_conditions, perturbations])
 
-    print("Y0 shape before flattening:", Y0.shape)
+    #print("Y0 shape before flattening:", Y0.shape)
+    #print("Y0 shape for variational:", Y0.flatten().shape)
+    #print("Y0 shape for elastic:", Y0[:4].flatten().shape)
 
     # Solve variational equation
     sol = solve_ivp(variational_IVP, t_span, Y0.flatten(), args=params, t_eval=t_eval,
                     method='RK45', atol=1e-12, rtol=1e-12, vectorized=True)
+    
+    #sol2 = solve_ivp(elastic_pendulum, t_span, Y0[:4].flatten(), args=params, t_eval=t_eval,
+    #                method='RK45', atol=1e-12, rtol=1e-12, vectorized=True)
 
     # Extract perturbation vector evolution: (4, n_ic, 4, n_eval)
-    dy_sol = sol.y[4:].reshape(4, n_ic, 4, -1)
+
+    #y_sol = sol.y[:8].reshape(4, n_ic, -1)
+    dy_sol = sol.y[8:].reshape(4, n_ic, -1)
+    #y_sol2 = sol2.y.reshape(4, n_ic, -1)
+    #.reshape(4, n_ic, 4, -1)
+    #print("elastic y:", y_sol2.shape)
+    #print("variational y:", y_sol.shape)
+    #print("variational dy:",dy_sol.shape)
+    
+    #transpose matrix to get the initial condition back as a row
+    #print(dy_sol.shape)
+    #print(dy_sol[0][1])
+    dy_sol = np.swapaxes(dy_sol, 0 , 1)
+    #print(dy_sol.shape)
+    #print(dy_sol[1][0])
+    
+    #dy0 = dy_sol[:,:,0]
+    #dyT = dy_sol[:,:,-1]
+
+    lyap_exponents = []
+    for i in range(n_ic):
+        #compute the starting norm
+        #print(dy_sol[i, :, 0], dy_sol[i, :,-1])
+        norm_dy0 = np.linalg.norm(dy_sol[i,:,0])
+        norm_dyT = np.linalg.norm(dy_sol[i,:,-1])
+        l_exponent = (1/t_max)*np.log(norm_dy0 / norm_dyT)
+        lyap_exponents.append(l_exponent)
+
 
     # Compute the norm of perturbation over time: (n_ic, n_eval)
-    norm_dy = np.linalg.norm(dy_sol, axis=(0, 2))  # Frobenius norm over (4,4)
+    #norm_dy = np.linalg.norm(dy_sol, axis=(0, 2))  # Frobenius norm over (4,4)
 
+    #norm_dy = np.linalg.norm(dy_sol, axis=0)  # Sum across state variables
+    #print(sol.t.shape)
+    #print(norm_dy.shape)
     # Compute Lyapunov exponent for each initial condition
-    lyap_exponents = np.polyfit(sol.t, np.log(norm_dy), 1)[0]
+    #lyap_exponents = np.polyfit(sol.t, np.log(norm_dy), 1)[0]
 
     return lyap_exponents  # Array of Lyapunov exponents for all `n_ic`
 
 g, k, m, L0, epsilon = 9.81, 1.0, 1.0, 10.0, -1
-
+"""
 initial_conditions = np.array([
     [1.0, np.pi/6, 0.0, 0.0],
-    [1.2, np.pi/4, 0.0, 0.0],
-    [0.8, np.pi/3, 0.0, 0.0],
+    [1.2, np.pi/4, 0.0, 0.0]
+]).transpose()
+
+[0.8, np.pi/3, 0.0, 0.0],
     [1.1, np.pi/2, 0.0, -0.5],
     [1, 0, -10.0, 0.1]
-]).transpose()
-"""
 # Check if dimensions are consistent for vectorized solver
 assert elastic_pendulum(1, initial_conditions, g, k, m, L0, epsilon).shape \
     == initial_conditions.shape
@@ -194,24 +227,35 @@ plt.suptitle(
 )
 plt.show()
 """
+initial_conditions=np.array([
+            [1, 1],
+            [0.52359878, 1.04719755],
+            [0, 0],
+            [0, 0]])
+perturbations=np.array([
+ [1, 1],
+ [0, 0],
+ [0, 0],
+ [0, 0]])
 
 # Generate perturbations dynamically for the number of initial conditions
 n_ic = initial_conditions.shape[1]
-perturbations = np.random.uniform(-1e-6, 1e-6, size=(4, n_ic))  # Perturb each state a little
+#perturbations = np.random.uniform(-1e-6, 1e-6, size=(4, n_ic))  # Perturb each state a little
+#print(perturbations.shape)
 
 # Compute Lyapunov exponents for all initial conditions
 lyap_exps = compute_lyapunov_exponent(initial_conditions, perturbations, (g, k, m, L0, epsilon))
 
-print(f"Largest Lyapunov Exponents for {n_ic} cases: {lyap_exps}")
-
+print(f"Lyapunov Exponents for {n_ic} cases: {lyap_exps}")
+"""
 def plot_perturbation_growth(sol, n_ic):
-    """
+    
     Plots the norm of perturbation growth over time for each initial condition.
     
     Parameters:
         sol : OdeSolution object from solve_ivp
         n_ic : int, Number of initial conditions
-    """
+    
     t = sol.t  # Time points
     dy_sol = sol.y[4:].reshape(4, n_ic, 4, -1)  # Reshape perturbation part
 
@@ -232,4 +276,5 @@ def plot_perturbation_growth(sol, n_ic):
     plt.show()
 
 # Example usage after calling compute_lyapunov_exponent:
-plot_perturbation_growth(sol, n_ic)
+plot_perturbation_growth(sol, n_ic)"
+"""
